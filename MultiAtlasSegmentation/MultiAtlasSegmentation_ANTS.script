@@ -1,0 +1,176 @@
+#!/usr/local/bin/tcsh -f
+
+setenv LD_LIBRARY_PATH /biomed-resimg/crews_rodent/devel/linux/STAPLE/staple_V1.4.1/itk/lib/InsightToolkit:/biomed-resimg/crews_rodent/devel/linux/STAPLE/staple_V1.4.1/vtk/lib/vtk-5.4:$LD_LIBRARY_PATH
+
+set MultiAtlasDir = /biomed-resimg/UCIrvine/FetalProgramming/processing/sMRI/MultiAtlas_Segmentation/Multi_Atlas_hippoAlign
+
+#Autism
+set DataDir = /biomed-resimg/UCIrvine/FetalProgramming/Data
+foreach T2Case($DataDir/BUSS_????/sMRI/AutoSeg_03_2012_UseGeometryAlign_UseABC/Stripped_edit_hippoAlign/*_T2_Bias_regAtlas_corrected_EMS_stripped_edit_hippoAlign.nrrd)
+ set CaseNb = $T2Case:h:h:h:h:t
+ echo 'CaseNb: ' $CaseNb
+
+ set T1Case = $T2Case:s/T2_Bias_regAtlas/T1_Bias_regT2_regAtlas/
+
+ set MultiAtlasSegDir = $T2Case:h:h/MultiAtlas_Amyg_Hippo_Segmentation_hippoAlign
+ if (! -e $MultiAtlasSegDir) mkdir $MultiAtlasSegDir
+
+ set atlasNb = 0
+ foreach T2Atlas($MultiAtlasDir/BUSS_????_T2_hippoAlign_stripped*.nrrd)
+   set AtlasName = $T2Atlas:t:r:s/_T2_hippoAlign_stripped//
+   set AtlasNb = $AtlasName:s/_flipped//
+   set T1Atlas = $T2Atlas:s/T2/T1/
+   set AtlasLabelMap = $T2Atlas:s/_T2_hippoAlign_stripped/_amyg_hippo/
+   echo '\n\tAtlasNb: ' $AtlasName
+
+  if ($AtlasNb != $CaseNb) then
+
+   set WarpROIDir = $MultiAtlasSegDir/${AtlasName}_MultiVar_TO_${CaseNb}
+   if (! -e $WarpROIDir) mkdir $WarpROIDir
+
+   # ANTS warping
+   echo  '\tANTS registration...'
+   set AffTransform  = $WarpROIDir/${AtlasName}_MultiVar_TO_${CaseNb}_Affine.txt
+   set WarpField = $WarpROIDir/${AtlasName}_MultiVar_TO_${CaseNb}_Warp.nii.gz
+   if (! -e $WarpField) then
+     /opt/local/ANTS/ANTs-1.9.x-Linux/bin/ANTS 3 -m CC\[$T1Case,$T1Atlas,2,2\] -m CC\[$T2Case,$T2Atlas,1,2\] -i 100x50x25 -o $WarpROIDir/${AtlasName}_MultiVar_TO_${CaseNb}_ -t SyN\[0.25\] -r Gauss\[3,0\]
+   endif 
+
+   #set WarpedT2Atlas = $WarpROIDir/${AtlasName}_T2_TO_${CaseNb}_warp.nrrd
+   #if (! -e $WarpedT2Atlas) then
+   #  /opt/local/ANTS/ANTs-1.9.x-Linux/bin/WarpImageMultiTransform 3 $T2Atlas $WarpedT2Atlas -R $T2Case --use-BSpline $WarpField $AffTransform
+   #endif
+
+   set WarpedT1Atlas = $WarpROIDir/${AtlasName}_T1_TO_${CaseNb}_warp.nrrd
+   if (! -e $WarpedT1Atlas) then
+     /opt/local/ANTS/ANTs-1.9.x-Linux/bin/WarpImageMultiTransform 3 $T1Atlas $WarpedT1Atlas -R $T1Case --use-BSpline $WarpField $AffTransform
+   endif
+
+   # Applying transformation
+   echo  '\tApplying deformation to label map...'
+   set WarpAtlasLabelMap = $WarpROIDir/${CaseNb}--Amyg_Hippo_${AtlasName}.nrrd
+   if (! -e $WarpAtlasLabelMap) then
+     /opt/local/ANTS/ANTs-1.9.x-Linux/bin/WarpImageMultiTransform 3 $AtlasLabelMap $WarpAtlasLabelMap -R $T2Case --use-NN $WarpField $AffTransform
+   endif
+
+   if ($atlasNb == 0) then
+     set allStructures = $WarpAtlasLabelMap
+   else
+     set allStructures = ($allStructures $WarpAtlasLabelMap)
+   endif
+   @ atlasNb ++
+
+  endif
+ end
+
+
+  echo  '\n\tLabel fusion...'
+
+   # STAPLE
+  set STAPLEStructure = $MultiAtlasSegDir/${CaseNb}--Amyg_Hippo_STAPLE.nrrd
+  set STAPLEStructureInfo = $MultiAtlasSegDir/${CaseNb}--Amyg_Hippo_STAPLE.txt
+  if (! -e $STAPLEStructure) then
+    echo  '\t\tLabel fusion with STAPLE...'
+    /biomed-resimg/crews_rodent/devel/linux/STAPLE/staple_V1.4.1/bin/crlSTAPLE $allStructures --compressOutput --outputImage $STAPLEStructure | grep "SPREADSHEET,PV" >> $STAPLEStructureInfo
+    /biomed-resimg/crews_rodent/devel/linux/STAPLE/staple_V1.4.1/bin/crlIndexOfMaxComponent $STAPLEStructure $STAPLEStructure 
+  endif
+
+
+  # Majority Voting
+  set MajVotingStructure = $MultiAtlasSegDir/${CaseNb}--Amyg_Hippo_MajVoting.nrrd
+  if (! -e $MajVotingStructure) then
+    echo  '\t\tLabel fusion with majority voting...'
+    
+    set StructureNb = 1
+    set StructureList = ''
+    foreach Structure ($allStructures)
+      if ($StructureNb == 1) then
+        set FirstStructure = $Structure
+      else if ($StructureNb == 2) then
+        set StructureList = $Structure
+      else
+        set StructureList = ($StructureList $Structure)
+      endif
+      @ StructureNb ++
+    end
+    ImageMath $FirstStructure -majorityVoting $StructureList -outfile $MajVotingStructure
+  endif
+
+end
+
+
+set EvaluateSegmentationDir = $cwd
+
+#Majority voting segmentation evaluation
+set EvaluateFile = $EvaluateSegmentationDir/EvaluateSegmentation_MultiAtlas_ANTS_MajorityVoting_AutoSeg_03_2012.csv
+echo 'Majority voting segmentation evaluation'
+if (! -e $EvaluateFile) then
+
+  echo 'Segmentation Result analysis: Subcortical structures\n' >! $EvaluateFile
+  echo 'Case/resultFilename; referenceFilename; volumeSeg; volumeRef; volumeDif; volumeDifPerc; fabs(volumeDifPerc); avgDistance; avgSqrDistance; maxDistance; tanimotoError; diceError' >> $EvaluateFile
+
+  set LabelList = {1,2,3,6}
+
+  foreach case($DataDir/BUSS_????/sMRI/MultiAtlas_Amyg_Hippo_Segmentation_hippoAlign/*--Amyg_Hippo_MajVoting.nrrd)
+    set CaseName = $case:h:h:h:t
+    echo 'Case: '$CaseName
+    echo '\n'$CaseName >> $EvaluateFile
+
+    set ReferenceSegmentation = $MultiAtlasDir/${CaseName}_amyg_hippo.nrrd 
+
+    # Extracting labels
+    foreach Label ($LabelList)
+      echo '\tLabel: '$Label
+      echo '\t\tExtracting label...' 
+      set SegmentedStructure = $case:r_Label${Label}.nrrd
+      ImageMath $case -extractLabel $Label -outfile $SegmentedStructure
+      set ReferenceStructure = $ReferenceSegmentation:r_Label${Label}.nrrd
+      ImageMath $ReferenceSegmentation -extractLabel $Label -outfile $ReferenceStructure
+
+      # Evaluate segmentation
+      echo '\t\tEvaluating segmentation...' 
+      EvaluateSegmentationResult $SegmentedStructure $ReferenceStructure >> $EvaluateFile
+
+      # Removing labels
+      rm $SegmentedStructure $ReferenceStructure
+    end
+  end
+ 
+endif
+
+#STAPLE segmentation evaluation
+set EvaluateFile = $EvaluateSegmentationDir/EvaluateSegmentation_MultiAtlas_ANTS_STAPLE_AutoSeg_03_2012.csv
+echo 'STAPLE segmentation evaluation'
+if (! -e $EvaluateFile) then
+
+  echo 'Segmentation Result analysis: Subcortical structures\n' >! $EvaluateFile
+  echo 'Case/resultFilename; referenceFilename; volumeSeg; volumeRef; volumeDif; volumeDifPerc; fabs(volumeDifPerc); avgDistance; avgSqrDistance; maxDistance; tanimotoError; diceError' >> $EvaluateFile
+
+  set LabelList = {1,2,3,6}
+
+  foreach case($DataDir/BUSS_????/sMRI/MultiAtlas_Amyg_Hippo_Segmentation_hippoAlign/*--Amyg_Hippo_STAPLE.nrrd)
+    set CaseName = $case:h:h:h:t
+    echo 'Case: '$CaseName
+    echo '\n'$CaseName >> $EvaluateFile
+
+    set ReferenceSegmentation = $MultiAtlasDir/${CaseName}_amyg_hippo.nrrd 
+
+    # Extracting labels
+    foreach Label ($LabelList)
+      echo '\tLabel: '$Label
+      echo '\t\tExtracting label...' 
+      set SegmentedStructure = $case:r_Label${Label}.nrrd
+      ImageMath $case -extractLabel $Label -outfile $SegmentedStructure
+      set ReferenceStructure = $ReferenceSegmentation:r_Label${Label}.nrrd
+      ImageMath $ReferenceSegmentation -extractLabel $Label -outfile $ReferenceStructure
+
+      # Evaluate segmentation
+      echo '\t\tEvaluating segmentation...' 
+      EvaluateSegmentationResult $SegmentedStructure $ReferenceStructure >> $EvaluateFile
+
+      # Removing labels
+      rm $SegmentedStructure $ReferenceStructure
+    end
+  end
+ 
+endif

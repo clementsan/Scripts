@@ -1,0 +1,483 @@
+#!/usr/local/bin/tcsh -f
+
+#This script will compute the EMS segmentation on the cases
+
+# VARIABLES SPECIFIC TO DATASET
+set ORIG_DATA_DIR = /home/vachet/BullitStudy_Test/Data
+set curpath = $cwd
+
+#location of segmentation atlas
+set atlasLoc = /tools/atlas/BrainsegAtlas/adult-atlas
+set atlasFile = $atlasLoc/template.gipl
+#location of areg/rreg parameter file
+set parfile = $atlasLoc/areg_par.txt 
+set AtlasIsoTemplate = /home/vachet/BullitStudy_Test/Processing/AtlasIso/template.gipl
+
+# SYSTEM VARIABLES
+# standard rview parameters nothing special
+
+
+set NbBits = ""
+set host = `hostname`
+if( ($OSTYPE == "linux") && ($host == "ares.ia.unc.edu" || $host == "pegasus.ia.unc.edu")) then
+    set NbBits = 64
+endif
+set itkEMS15Cmd = /tools/bin_linux/itkEMS
+set itkEMSCmd = /home/gouttard/Projects/22-MICCAI07/Data/processing/soft/brainseg_1.7e
+set aregCmd = /tools/rview_${OSTYPE}${NbBits}/areg
+set rregCmd = /tools/rview_${OSTYPE}/rreg
+set transformCmd = /tools/rview_${OSTYPE}/transformation
+set regParamFile = $cwd/areg_par.txt
+set IntResAtlasLoc = /conte_projects/CONTE_NEO/processing/Sylv_Seg/IntResAtlas/T2AtlasIntRes.gipl.gz
+set intensityRescaleCmd = IntensityRescaler  
+set imgConvCmd = /usr/bin/convert
+if (-e /usr/local/bin/convert) set imgConvCmd = /usr/local/bin/convert
+set convCmd = convertITKformats
+set reorientCmd = imconvert3
+set ImageMathCmd = /tools/bin_linux/ImageMath
+
+set qcPicDir = $curpath/QCPic-EMS
+if (! -e $qcPicDir) mkdir $qcPicDir
+ 
+set recomputeMontage = 1
+set QC_Pic = 1
+
+
+# Procedure (only do on T1 image)
+# 1. Convert all the original datasets from analyze to gipl and create QC images
+# 2. Register to atlas
+# 3. run itkEMS segmentation on single channel
+
+
+#Extracting all images
+#echo Extracting all images
+
+#set OrigCasesLoc = $ORIG_DATA_DIR/AgeGroup*/*/NormalA*
+#set NumCases = $#OrigCasesLoc
+#set RandNum  = `randperm 1 $NumCases`
+#foreach Index ($RandNum)
+#    set CurrDir = $OrigCasesLoc[$Index]
+#    echo Current Dir: $CurrDir
+    # Extracting the images (.tgz)
+#    if (! -e $CurrDir/Source) then
+#    	tar xvzf $CurrDir/Source.tgz -C $CurrDir
+#    endif
+    # Zipping the extracted images
+#    set GiplImage = $CurrDir/Source/*.gipl*
+#    foreach index ($GiplImage)
+#	if ($index:e != "gz") then
+#	    gzip -f $index
+#	endif
+#    end
+#end
+
+#echo Extracting all images DONE
+
+
+
+
+
+if($QC_Pic == 1) then
+
+#Make QC pictures (Quality Control)
+foreach case ($ORIG_DATA_DIR/AgeGroup*/*/NormalA*/Source/*T1_FLASH.gipl.gz )   
+    
+    set AutoSeg = $case:h:h/AutoSeg
+    if(! -e $AutoSeg) mkdir $AutoSeg
+
+    set QCPic = $case:h:h/AutoSeg/OrigQC
+    if(! -e $QCPic) mkdir $QCPic
+    set OutbaseName = $QCPic/Orig_$case:t:r:r
+    if (! -e {$OutbaseName}_sliceX.tiff) then
+	echo threeslice snapshot $case
+	ImageStat $case -threeSlice -outbase $OutbaseName
+    endif
+end
+
+set picsPrefix = Orig
+if ($recomputeMontage || ! -e $qcPicDir/QC_${picsPrefix}X.0.jpg) then
+
+    rm $qcPicDir/QC_${picsPrefix}*jpg
+
+    foreach axis (X Y Z)
+	foreach T1file ($ORIG_DATA_DIR/AgeGroup*/*/NormalA*/AutoSeg/OrigQC/*_slice$axis.tiff)
+	    set target = $T1file:s/_slice/_comb_slice/:r.gif
+	    if (! -e $target) then
+		echo  making Combination $target
+		#This command creates a color image with the 3 channels (RGB) that are the first 3 arguments
+		$imgConvCmd -combine $T1file $T1file $T1file -negate $target 
+	    endif
+	end
+	set tile = "5x5"
+	set num = 25
+	set size = 150
+	set cmd = ""
+	set count = 0
+	set imageCnt = 0
+	# Montage of the QC pictures
+	foreach i ( $ORIG_DATA_DIR/AgeGroup*/*/NormalA*/AutoSeg/OrigQC/*_comb_slice$axis.gif)
+	    set update = "$cmd -label $i:h:h:h:t $i"
+	    set cmd = "$update"
+	    @ count = $count + 1
+	    if ($count == $num) then
+		montage +frame +shadow +label -geometry $size -tile $tile $cmd $qcPicDir/QC_${picsPrefix}$axis.$imageCnt.jpg
+		@ imageCnt = $imageCnt + 1
+		set count = 0
+		set cmd = ""
+	    endif
+	end
+	if ($count != 0) then
+	    montage +frame +shadow +label -geometry $size -tile $tile $cmd $qcPicDir/QC_${picsPrefix}$axis.$imageCnt.jpg
+	endif
+    end
+endif
+
+endif
+
+
+
+
+# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# C) Rigid registration to an atlas
+# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+
+echo Registering case to a template
+
+set allcases = $ORIG_DATA_DIR/AgeGroup*/*/NormalA*/Source/*_T1_FLASH.gipl.gz
+set numcases = $#allcases
+set randnum  = `randperm 1 $numcases`
+foreach index ($randnum)          
+    set case = $allcases[$index]
+    echo Current case: $case
+ 
+    set AutoSeg = $case:h:h/AutoSeg
+    if(! -e $AutoSeg) mkdir $AutoSeg
+
+    set  AtlasIso = $case:h:h/AutoSeg/atlasIso
+    if(! -e $AtlasIso) mkdir $AtlasIso
+
+    # Parameter File
+    set DofOut = $AtlasIso/$case:t:s/.gipl.gz/.dof/
+    # Report File: processing information
+    set report = $AtlasIso/$case:t:s/.gipl.gz/_out.txt/
+    # Image registered to the atlas
+    set OutFile = $AtlasIso/$case:t:s/.gipl.gz/_regAtlas.gipl/
+
+    if(! -e $report) then
+
+	if($case:e == "gz") then
+	    echo Unzipping $case:t
+	    gunzip -f $case
+	    set case = $case:r
+	endif
+	if(! -e $DofOut) then
+	    echo Computing Rigid registration
+	    $rregCmd $AtlasIsoTemplate $case -dofout $DofOut -parameter $regParamFile -conjugate >! $report
+	endif
+	if(! -e $OutFile) then
+	    echo Transformation
+	    $transformCmd $case $OutFile -dofin $DofOut -cspline -target $AtlasIsoTemplate
+	endif
+
+	if(-e $OutFile) gzip -f $OutFile
+	if(-e $case) gzip -f $case
+    endif
+
+    
+    # T2 Registration to a template
+    set T2File = $case:s/_T1_FLASH.gipl/_T2.gipl.gz/
+    # Parameter File
+    set DofOut = $AtlasIso/$T2File:t:s/.gipl.gz/.dof/
+    # Report File: processing information
+    set report = $AtlasIso/$T2File:t:s/.gipl.gz/_out.txt/
+    # Image registered to the atlas
+    set OutFile = $AtlasIso/$T2File:t:s/.gipl.gz/_regT1_regAtlas.gipl/
+
+    # Registered T1 Image
+    set T1regAtlas = $AtlasIso/$case:t:s/.gipl/_regAtlas.gipl.gz/
+
+    if(! -e $report) then
+
+	if($T2File:e == "gz") then
+	    echo Unzipping $T2File:t
+	    gunzip -f $T2File
+	    set T2File = $T2File:r
+	endif
+	if(! -e $DofOut) then
+            if($T1regAtlas:e == "gz") then
+		echo Unzipping $T1regAtlas:t
+		gunzip -f $T1regAtlas
+		set T1regAtlas = $T1regAtlas:r
+	    endif
+	    echo Computing Rigid registration            
+	    $rregCmd $T1regAtlas $T2File -dofout $DofOut -parameter $regParamFile -conjugate >! $report 	    
+	endif
+	if(! -e $OutFile) then
+	    echo Transformation
+	    $transformCmd $T2File $OutFile -dofin $DofOut -cspline -target $T1regAtlas
+	endif
+
+	if(-e $T1regAtlas) gzip -f $T1regAtlas
+	if(-e $OutFile) gzip -f $OutFile
+	if(-e $T2File) gzip -f $T2File
+    endif
+
+end
+
+echo Registering case to a template DONE
+
+
+
+
+
+if($QC_Pic == 1) then
+
+echo Make QC Pictures
+
+#Make QC pictures
+foreach case ($ORIG_DATA_DIR/AgeGroup*/*/NormalA*/AutoSeg/atlasIso/*T1_FLASH_regAtlas.gipl.gz )   
+    set QCPic = $case:h/QCPic
+    if(! -e $QCPic) mkdir $QCPic
+    set OutbaseName = $QCPic/Orig_$case:t:r:r
+    if (! -e {$OutbaseName}_sliceX.tiff) then
+	echo threeslice snapshot $case
+	ImageStat $case -threeSlice -outbase $OutbaseName
+    endif
+end
+
+set picsPrefix = Orig
+if ($recomputeMontage || ! -e $qcPicDir/QC_${picsPrefix}X.0.jpg) then
+
+    rm $qcPicDir/QC_${picsPrefix}*jpg
+    foreach axis (X Y Z)
+	foreach T1file ($ORIG_DATA_DIR/AgeGroup*/*/NormalA*/AutoSeg/atlasIso/QCPic/*_slice$axis.tiff)
+	    set target = $T1file:s/_slice/_comb_slice/:r.gif
+	    if (! -e $target) then
+		echo  making Combination $target
+		#This command creates a color image with the 3 channels (RGB) that are the first 3 arguments
+		$imgConvCmd -combine $T1file $T1file $T1file -negate $target 
+	    endif
+	end
+	set tile = "5x5"
+	set num = 25
+	set size = 150
+	set cmd = ""
+	set count = 0
+	set imageCnt = 0
+	foreach i ( $ORIG_DATA_DIR/AgeGroup*/*/NormalA*/AutoSeg/atlasIso/QCPic/*_comb_slice$axis.gif)
+	    set update = "$cmd -label $i:h:h:h:h:t $i"
+	    set cmd = "$update"
+	    @ count = $count + 1
+	    if ($count == $num) then
+		montage +frame +shadow +label -geometry $size -tile $tile $cmd $qcPicDir/QC_${picsPrefix}$axis.$imageCnt.jpg
+		@ imageCnt = $imageCnt + 1
+		set count = 0
+		set cmd = ""
+	    endif
+	end
+	if ($count != 0) then
+	    montage +frame +shadow +label -geometry $size -tile $tile $cmd $qcPicDir/QC_${picsPrefix}$axis.$imageCnt.jpg
+	endif
+    end
+endif
+
+endif
+
+
+
+
+# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# C) Run  itkEMS 
+# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+
+set allcases = $ORIG_DATA_DIR/AgeGroup*/*/NormalA*/AutoSeg/atlasIso/*T1_FLASH_regAtlas.gipl.gz
+set numcases = $#allcases
+set randnum  = `randperm 1 $numcases`
+foreach index ($randnum)          
+    set case = $allcases[$index]
+    echo Current case: $case
+    set  emsFolder = $case:h:h/ems
+    set  EMSfile = $emsFolder/EMSparam.xml
+    set  SUFFIX = EMS
+    set  resLabel = $emsFolder/$case:t:r:r_labels_${SUFFIX}.gipl.gz
+    
+    set Atlas = ""
+    set CaseNum = $case:h:h:h:t
+
+    echo Adult case
+    set Atlas = $atlasLoc
+
+    set T2regT1regAtlas = $case:s/T1_FLASH_regAtlas.gipl.gz/T2_regT1_regAtlas.gipl.gz/
+
+#    if (! -e  $resLabel) then
+    if(! -e $EMSfile) then
+	echo EMS segmentation $case $resLabel
+        if (! -e $emsFolder) mkdir $emsFolder 
+
+	set itkEMS_v = 1
+
+	if($itkEMS_v == 1) then
+	#ITKEMS 1.5
+	    # create EMS file
+	    echo '<?xml version="1.0"?>' >! $EMSfile
+	    echo '<\!DOCTYPE SEGMENTATION-PARAMETERS>' >> $EMSfile
+	    echo '<SEGMENTATION-PARAMETERS>' >> $EMSfile
+	    echo '<SUFFIX>'$SUFFIX'</SUFFIX>' >> $EMSfile
+	    echo '<ATLAS-DIRECTORY>'$Atlas'</ATLAS-DIRECTORY>' >> $EMSfile
+	    echo '<ATLAS-ORIENTATION>RAI</ATLAS-ORIENTATION>' >> $EMSfile
+	    echo '<OUTPUT-DIRECTORY>'$emsFolder'</OUTPUT-DIRECTORY>' >> $EMSfile
+	    echo '<OUTPUT-FORMAT>GIPL</OUTPUT-FORMAT>' >> $EMSfile
+	    echo '<IMAGE>' >> $EMSfile
+	    echo '  <FILE>'$case'</FILE>' >> $EMSfile
+	    echo '  <ORIENTATION>RAI</ORIENTATION>' >> $EMSfile
+	    echo '</IMAGE>' >> $EMSfile
+	    echo '<IMAGE>' >> $EMSfile
+	    echo '  <FILE>'$T2regT1regAtlas'</FILE>' >> $EMSfile
+	    echo '  <ORIENTATION>RAI</ORIENTATION>' >> $EMSfile
+	    echo '</IMAGE>' >> $EMSfile
+	    echo '<FILTER-ITERATIONS>10</FILTER-ITERATIONS>' >> $EMSfile
+	    echo '<FILTER-TIME-STEP>0.01</FILTER-TIME-STEP>' >> $EMSfile
+	    echo '<MAX-BIAS-DEGREE>4</MAX-BIAS-DEGREE>' >> $EMSfile
+	    echo '<PRIOR-1>1.3</PRIOR-1>' >> $EMSfile
+	    echo '<PRIOR-2>1</PRIOR-2>' >> $EMSfile
+	    echo '<PRIOR-3>0.7</PRIOR-3>' >> $EMSfile
+	    echo '<PRIOR-4>1</PRIOR-4>' >> $EMSfile
+	    echo '</SEGMENTATION-PARAMETERS>' >> $EMSfile
+
+	    $itkEMS15Cmd $EMSfile
+	else
+	    # create EMS file
+	    echo '<?xml version="1.0"?>' >! $EMSfile
+	    echo '<\!DOCTYPE SEGMENTATION-PARAMETERS>' >> $EMSfile
+	    echo '<SEGMENTATION-PARAMETERS>' >> $EMSfile
+	    echo '<SUFFIX>'$SUFFIX'</SUFFIX>' >> $EMSfile
+	    echo '<ATLAS-DIRECTORY>'$Atlas'</ATLAS-DIRECTORY>' >> $EMSfile
+	    echo '<ATLAS-ORIENTATION>RAI</ATLAS-ORIENTATION>' >> $EMSfile
+	    echo '<OUTPUT-DIRECTORY>'$emsFolder'</OUTPUT-DIRECTORY>' >> $EMSfile
+	    echo '<OUTPUT-FORMAT>GIPL</OUTPUT-FORMAT>' >> $EMSfile
+	    echo '<IMAGE>' >> $EMSfile
+	    echo '  <FILE>'$case'</FILE>' >> $EMSfile
+	    echo '  <ORIENTATION>RAI</ORIENTATION>' >> $EMSfile
+	    echo '</IMAGE>' >> $EMSfile
+	    echo '<IMAGE>' >> $EMSfile
+	    echo '  <FILE>'$T2regT1regAtlas'</FILE>' >> $EMSfile
+	    echo '  <ORIENTATION>RAI</ORIENTATION>' >> $EMSfile
+	    echo '</IMAGE>' >> $EMSfile
+	    echo '<FILTER-ITERATIONS>10</FILTER-ITERATIONS>' >> $EMSfile
+	    echo '<FILTER-TIME-STEP>0.01</FILTER-TIME-STEP>' >> $EMSfile
+	    echo '<FILTER-METHOD>Curvature flow</FILTER-METHOD>' >> $EMSfile
+	    echo '<MAX-BIAS-DEGREE>4</MAX-BIAS-DEGREE>' >> $EMSfile
+	    echo '<PRIOR-1>1.3</PRIOR-1>' >> $EMSfile
+	    echo '<PRIOR-2>1</PRIOR-2>' >> $EMSfile
+	    echo '<PRIOR-3>0.7</PRIOR-3>' >> $EMSfile
+	    echo '<PRIOR-4>1</PRIOR-4>' >> $EMSfile
+	    echo '<DO-ATLAS-WARP>1</DO-ATLAS-WARP>' >> $EMSfile
+	    echo '<ATLAS-WARP-GRID-X>5</ATLAS-WARP-GRID-X>' >> $EMSfile
+	    echo '<ATLAS-WARP-GRID-Y>5</ATLAS-WARP-GRID-Y>' >> $EMSfile
+	    echo '<ATLAS-WARP-GRID-Z>5</ATLAS-WARP-GRID-Z>' >> $EMSfile
+	    echo '</SEGMENTATION-PARAMETERS>' >> $EMSfile
+    
+	    $itkEMSCmd $EMSfile
+
+	endif
+	
+	gzip -fq $emsFolder/*.gipl
+	
+	foreach File (`ls $emsFolder/*.gipl_*`)
+	    mv $File $File:s/.gipl_/_/	    
+	end
+
+    endif
+
+end
+
+echo EMS segmentation DONE
+
+
+if($QC_Pic == 1) then
+    #Make QC pictures 
+    foreach case ($ORIG_DATA_DIR/AgeGroup*/*/NormalA*/AutoSeg/ems/*T1_FLASH_regAtlas_{labels,corrected}_EMS.gipl.gz)   
+	set caseDir = $case:h:t
+	set QCDir = $case:h/QCPic
+	if(! -e $QCDir) mkdir $QCDir
+	set OutbaseName = $QCDir/$case:t:r:r
+	if (! -e {$OutbaseName}_sliceX.tiff ) then
+	    echo  making $case
+	    ImageStat $case -threeSlice -outbase $OutbaseName
+	endif
+    end
+    
+    echo Making QC pics Done
+    
+    if ($recomputeMontage || ! -e $qcPicDir/QC_EMS_X.0.jpg) then
+	rm $qcPicDir/QC_EMS*jpg
+	foreach axis (X Y Z)  
+	    foreach T1file ($ORIG_DATA_DIR/AgeGroup*/*/NormalA*/AutoSeg/ems/QCPic/*_corrected_EMS_slice$axis.tiff)
+		set EMSfile = $T1file:s/_corrected_EMS/_labels_EMS/
+		set target = $EMSfile:s/_slice/_comb_slice/:r.gif
+		if (! -e $target) then
+		    echo  making Combination $target
+		    #This command creates a color image with the 3 channels (RGB) that are the first 3 arguments
+		    $imgConvCmd -combine $T1file $EMSfile $EMSfile -negate $target 
+		endif
+	    end
+	    
+	    set tile = "4x4"
+	    set num = 16
+	    set size = 150
+	    set cmd = ""
+	    set count = 0
+	    set imageCnt = 0
+	    foreach i ($ORIG_DATA_DIR/AgeGroup*/*/NormalA*/AutoSeg/ems/QCPic/*labels*comb_slice$axis.gif)
+		set update = "$cmd -label $i:h:h:h:h:t $i"
+		set cmd = "$update"
+		@ count = $count + 1
+		if ($count == $num) then
+		    montage +frame +shadow +label -geometry $size -tile $tile $cmd $qcPicDir/QC_EMS_$axis.$imageCnt.jpg
+		    @ imageCnt = $imageCnt + 1
+		    set count = 0
+		    set cmd = ""
+		endif
+	    end
+	    if ($count != 0) then
+		montage +frame +shadow +label -geometry $size -tile $tile $cmd $qcPicDir/QC_EMS_$axis.$imageCnt.jpg
+	    endif
+	end
+    endif
+endif
+
+echo Collecting QC pics DONE
+
+
+
+
+
+# -------------------------------
+# -------------------------------
+#Sanity check for zipped images
+# -------------------------------
+# -------------------------------
+
+echo Zip sanity check
+
+set unzipCases = `ls $ORIG_DATA_DIR/AgeGroup*/*/NormalA*/AutoSeg{.,ems*}/*.gipl` 
+if ($#unzipCases > 0) then
+    foreach image ($unzipCases)
+	if (! -e $image.gz) then
+	    echo Zipping $image
+	    gzip -f $image
+	else
+	    echo removing $image
+	    rm $image
+	endif
+    end
+endif
+echo Done

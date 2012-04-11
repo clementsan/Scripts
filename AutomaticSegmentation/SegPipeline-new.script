@@ -1,0 +1,1250 @@
+#!/usr/bin/tcsh -f
+
+# This scripts computes the subcortical segmentation on the ACE phantom dataset.
+#For the segmentation we are using the tissue segmentation computed with the rigid registration (no scaling)
+
+# VARIABLES SEPCIFIC TO DATASET
+set ORIG_DATA_DIR = /home/sci/gouttard/Projects/04-Autism-ACENetwork/PhantomData/Data
+set curpath = $cwd
+
+#Set atlas location for the structures
+set atlasLoc = /home/sci/gouttard/Projects/04-Autism-ACENetwork/PhantomData/processing/SubCortSeg/AllAtlas/BrainROI
+set atlasFileName = $atlasLoc/template.gipl
+set EMSDir = ems17j_Aff_rig
+
+set parfile = $curpath/areg_par.txt 
+
+# SYSTEM VARIABLES
+# standard rview parameters nothing special
+set hostname = $HOSTNAME
+if($HOSTNAME == "hex.sci.utah.edu") then
+    set usrname = NeuroGroup
+else
+    set usrname = gouttard
+endif
+set SoftDir = /scratch/$usrname/software/bin
+set aregCmd = $SoftDir/areg
+set rregCmd = $SoftDir/rreg
+set transformCmd = $SoftDir/transformation
+set warpCmd = $SoftDir/fWarp
+set ImageMathCmd = ImageMath
+set imgConvCmd = /usr/bin/convert
+set SegPostProcessCmd =  $SoftDir/SegPostProcess
+set convCmd = $SoftDir/convertITKformats
+set reorientCmd = $SoftDir/imconvert3
+
+#########################################################################################
+# Mode
+
+#Compute the QC pic if = 1, don't if = 0
+set QC_PIC = 0
+set qcPicDir = $curpath/pics_autoSeg
+#Compute the Cases randomly if Random_Mode = 1, don't if = 0
+set Random_Mode = 1
+# Single case Mode
+set Single_Case = 0
+set single_case = UNC_Trio/Time1/Phantom1
+#Extract Volume Information
+set VOL = 0
+
+echo Single case Mode: $Single_Case
+echo Random Mode: $Random_Mode
+echo QC Pic: $QC_PIC
+
+########################################################################################
+
+###########################################################################
+###########################################################################
+
+#First step is to create the skull stripping image
+
+###########################################################################
+###########################################################################
+
+#skull striping of all the cases
+echo Skull striping all the cases
+
+set compte = 0
+
+if($Single_Case != 0) then
+    set allcases = $ORIG_DATA_DIR/$single_case/$EMSDir/*labels_EMS.gipl.gz
+endif
+if($Single_Case == 0) then
+    set allcases = $ORIG_DATA_DIR/*/Time?/Phantom?/$EMSDir/*labels_EMS.gipl.gz
+endif
+
+set Pourcentage = 0
+set pos = 0
+set numcases = $#allcases
+#Gives a random permutation of all the cases
+set randnum  = `shuf -i 1-{$numcases}`
+
+while($pos != $numcases)
+
+  @ pos = $pos + 1
+
+  if($Random_Mode == 1) then 
+    set case = $allcases[$randnum[$pos]]
+    echo Random case: $case
+  endif
+  if($Random_Mode == 0) then
+    set case = $allcases[$pos]
+    echo case: $case
+  endif
+
+  set currentCase = $case:h/T1*_corrected_EMS.gipl.gz
+ 
+  echo Image to be croped: $currentCase
+  echo current case: $case
+
+  if ( $case != "") then
+	set targetDir = $case:h:h/Stripped
+	if (! -e $targetDir) mkdir $targetDir
+	
+	set target = $targetDir/$case:t:s/_labels_EMS/_bgmask/
+	set finalTarget = $targetDir/$currentCase:t:s/.gipl.gz/-stripped.gipl.gz/
+	set targetun = $target:s/.gipl/tmp1.gipl/
+	set targetdeux = $target:s/.gipl/tmp2.gipl/
+        if (! -e $finalTarget & ! -e $finalTarget:r) then
+
+	  echo Skull stripping $case
+	  #Creating the binary mask
+	  $ImageMathCmd $case -threshold 1,3 -outfile $targetun
+	  #Dilation of the binary mask
+	  $ImageMathCmd $targetun  -dilate 1,1 -outfile $targetun
+	  #In order to make sur that the binary mask is fine (without holes and smoothed)
+	  SegPostProcess $targetun -o $targetdeux
+	  #Masking the original case with the binary image
+	  $ImageMathCmd $currentCase -mask $targetdeux -outfile $finalTarget
+	  
+	  rm -f $targetun 
+          rm -f $target
+	  mv $targetdeux $targetdeux:s/tmp2.gipl/_mask.gipl/	
+
+	endif
+    endif
+
+    @ Pourcentage = $pos * 100
+    set val = `expr $Pourcentage / $numcases`
+    echo Pourcentage done of skull striping: $val %
+
+end
+
+echo Skull stripping done
+
+
+##############################################################
+##############################################################
+
+# B) Intensity calibration
+
+##############################################################
+##############################################################
+
+if($Single_Case != 0) then
+    set allcases = $ORIG_DATA_DIR/$single_case/Stripped/*stripped.gipl.gz
+endif
+if($Single_Case == 0) then
+    set allcases = $ORIG_DATA_DIR/*/Time?/Phantom?/Stripped/*stripped.gipl.gz
+endif
+
+set Pourcentage = 0
+
+set pos = 0
+set numcases = $#allcases
+set randnum  = `shuf -i 1-{$numcases}`
+
+echo Registering Atlas to case 
+
+while($pos != $numcases)
+
+ @ pos = $pos + 1
+
+ if($Random_Mode == 1) then 
+    set case = $allcases[$randnum[$pos]]
+    echo Random case: $case
+ endif
+ if($Random_Mode == 0) then
+    set case = $allcases[$pos]
+    echo case: $case
+ endif
+
+  echo Intensity rescaling to the Atlas
+  
+  #Get the case number
+  set atlasFile = $atlasFileName
+
+  #Set the output result directory
+  set result = $case:h
+  #Set the extention
+  set extention = -irescaled
+
+  #First we set the current case images: Image+EMS
+  set SourceImageT1Stripped = $case
+  set TargetImageAtlasImage = $atlasFile
+
+  #Output name:
+  set OutputName = $result/$SourceImageT1Stripped:t:s/.gipl.gz//$extention.gipl.gz
+
+  if(! -e $OutputName && ! -e $OutputName:r) then
+    echo doing ImageMath-matchHistogram  $result
+    $ImageMathCmd $SourceImageT1Stripped -matchHistogram $TargetImageAtlasImage -outfile $OutputName 
+    
+  endif
+
+  echo Case intensity rescaled
+
+  @ Pourcentage = $pos * 100
+  set val = `expr $Pourcentage / $numcases`
+  echo Pourcentage done of registration: $val %
+end
+
+echo Intensity Calibration DONE
+
+
+##############################################################
+##############################################################
+
+# B) Register affine transform (15 param) to a template
+
+##############################################################
+##############################################################
+
+
+if($Single_Case != 0) then
+    set allcases = $ORIG_DATA_DIR/$single_case/Stripped/*stripped-irescaled.gipl*
+endif
+if($Single_Case == 0) then
+    set allcases = $ORIG_DATA_DIR/*/Time?/Phantom?/Stripped/*stripped-irescaled.gipl*
+endif
+
+set Pourcentage = 0
+
+set pos = 0
+set numcases = $#allcases
+set randnum  = `shuf -i 1-{$numcases}`
+
+echo Registering Atlas to case 
+
+while($pos != $numcases)
+
+ @ pos = $pos + 1
+
+ if($Random_Mode == 1) then 
+    set case = $allcases[$randnum[$pos]]
+    echo Random case: $case
+ endif
+ if($Random_Mode == 0) then
+    set case = $allcases[$pos]
+    echo case: $case
+ endif
+
+   set targetDir = $case:h:h/WarpROI
+   if (! -e $targetDir) mkdir $targetDir
+
+   set  target = $targetDir/AtlasAffReg-$case:t
+
+   if (! -e $target || ! -e $target.gz) then
+	if($case:e == "gz") then
+	    gunzip -f $case
+	    set case = $case:r
+	    set target = $target:r
+	endif
+	set report = $target:s/.gipl/_cout.txt/
+	set dofoutAreg = $target:s/.gipl/_areg.dof/
+	set dofinputAreg = $target:s/.gipl/_aregNine.dof/
+	
+	if (! -e $dofoutAreg) then
+	    set RigidRegDof = $target:h/RigidRegDof.dof
+	    echo Registering Atlas to $case
+	    echo Computation of the 6 parameters
+	    if(! -e $RigidRegDof) then
+		echo Computation of the 6 Parameters registration
+		$rregCmd $case $atlasFile -dofout $RigidRegDof -parameter $parfile -conjugate >! $report
+	    endif
+	    echo $dofoutAreg
+	    if(! -e $dofoutAreg) then
+		echo Computation of the 15 Parameters
+		$aregCmd $case $atlasFile -dofout $dofoutAreg -dofin $RigidRegDof -parameter $parfile -Tp 5 -conjugate >! $report  
+	    endif
+	endif
+
+	if ((! -e $target && ! -e $target.gz)) then 
+	    echo transforming $case 
+	    #transform all volumes, by default uses cspline interpolation	    
+	    $transformCmd $atlasFile $target -dofin $dofoutAreg -target $case -c1spline > $report
+	    echo transformed done
+	endif
+	
+	gzip -f $target
+	gzip -f $case
+    else
+      echo $target done
+    endif
+  
+    @ Pourcentage = $pos * 100
+    set val = `expr $Pourcentage / $numcases`
+    echo Pourcentage done of registration: $val %
+end
+
+echo Registering Atlas to case done
+
+############################################################
+############################################################
+
+# QC Pictures of the Affine Registration
+
+############################################################
+############################################################
+
+if($QC_PIC == 1) then
+    
+	    if(! -e $qcPicDir) mkdir $qcPicDir 
+
+	    #Make QC pictures
+	    set allcases = $ORIG_DATA_DIR/*/Time?/Phantom?/WarpROI/AtlasAffReg*.gipl.gz
+
+	    foreach case ($allcases)   
+		set OutQC = $case:h/QCPic
+		if(! -e $OutQC) mkdir $OutQC
+		set Outbase = $OutQC/$case:t:s/_regAtlas/./:r:r:r
+		if (! -e {$Outbase}_sliceX.tiff) then
+		    echo  threeslice snapshot $case		   
+		    ImageStat $case -threeSlice -outbase $Outbase
+		endif
+	    end
+
+	    set allcases = $ORIG_DATA_DIR/*/Time?/Phantom?/Stripped/*-stripped.gipl.gz
+
+	    foreach case ($allcases)
+		set OutQC = $case:h/QCPic
+		if(! -e $OutQC) mkdir $OutQC
+		set Outbase = $OutQC/$case:t:s/_regAtlas/./:r:r:r
+		if (! -e {$Outbase}_sliceX.tiff) then
+		    echo  threeslice snapshot $case
+		    ImageStat $case -threeSlice -outbase $Outbase
+		endif
+	    end
+
+
+	    echo Making QC pics Done
+	    foreach axis (X Y Z)
+	
+		set allcases = $ORIG_DATA_DIR/*/Time?/Phantom?/WarpROI/QCPic/AtlasAffReg*slice$axis.tiff
+
+		foreach i ($allcases)
+		  set T1file = $i:h:h:h/Stripped/QCPic/*T1_Orig_slice$axis.tiff
+		  set target = $i:s/_slice/_comb_slice/:r.gif
+		  if (! -e $target) then
+		      echo  making Combination $target
+		      #This command creates a color image with the 3 channels (RGB) that are the first 3 arguments
+		      $imgConvCmd -combine $i $i $T1file -negate $target
+		  endif
+	      end
+	      
+	      set tile = "4x4"
+	      set num = 16
+	      set size = 150 
+	      set cmd = ""
+	      set count = 0
+	      set imageCnt = 0
+	      set combimages = $ORIG_DATA_DIR/*/Time?/Phantom?/WarpROI/QCPic/AtlasAffReg*comb_slice$axis.gif
+	      
+	      foreach i ($combimages)
+		set case = $i:h:h:h:h:h:t
+		set caseID = $i:h:h:h:t:s/Phantom//     
+		set caseTime = $i:h:h:h:h:t
+		set lbl = $case-Phan$caseID-$caseTime
+		set update = "$cmd -label $lbl $i"
+		set cmd = "$update"
+		@ count = $count + 1
+		if ($count == $num) then
+			echo MONTAGE $qcPicDir/QC_AtlasAlign$axis.$imageCnt.jpg
+			montage +frame +shadow +label -geometry $size -tile $tile $cmd $qcPicDir/QC_AtlasAlign$axis.$imageCnt.jpg
+			
+			echo QC pic name:  $qcPicDir/QC_AtlasAlign$axis.$imageCnt.jpg
+			@ imageCnt = $imageCnt + 1
+			set count = 0
+			set cmd = ""
+		endif
+		
+      end
+      if ($count != 0) then
+	montage +frame +shadow +label -geometry $size -tile $tile $cmd $qcPicDir/QC_AtlasAlign$axis.$imageCnt.jpg
+      endif
+    end
+
+    echo Collecting QC pics Done
+endif
+
+#########################################################################
+#########################################################################
+
+#Warping procedure: Warping the Atlas to the skull stripping T1 image
+
+#########################################################################
+#########################################################################
+
+echo Warping computation
+
+if($Single_Case != 0) then
+    set allcases = $ORIG_DATA_DIR/$single_case/WarpROI/AtlasAffReg*.gipl.gz
+endif
+if($Single_Case == 0) then
+    set allcases = $ORIG_DATA_DIR/*/Time?/Phantom?/WarpROI/AtlasAffReg*.gipl.gz
+endif
+
+set Pourcentage = 0
+
+set pos = 0
+set numcases = $#allcases
+set randnum  = `shuf -i 1-{$numcases}`
+
+while($pos != $numcases)
+
+    @ pos = $pos + 1
+
+    if($Random_Mode == 1) then 
+	set case = $allcases[$randnum[$pos]]
+	echo Random case: $case
+    endif
+    if($Random_Mode == 0) then
+	set case = $allcases[$pos]
+	echo case: $case
+    endif
+	
+    if ( $case != "") then
+	echo Warped Case: $case
+	set targetDir = $case:h
+	set target = $case:s/AtlasAffReg/AtlasWarpReg/
+	set target = $target:r	    
+	set report = $target:s/.gipl/_cout.txt/
+
+    	if (! -e $report) then
+	    set affineAtlas = $case
+	    set skullStrippedT1 = $case:h:h/Stripped/*stripped-irescaled.gipl*
+	    echo $skullStrippedT1
+	    if($skullStrippedT1:e == "gz") then
+		gunzip -f $skullStrippedT1
+		set skullStrippedT1 = $skullStrippedT1:r
+	    endif
+
+	    gunzip -f $affineAtlas 
+	    set affineAtlas = $affineAtlas:r
+	    
+	    set dofoutWarp = $target:s/.gipl/_warp/
+	    set OutputImage = $target:s/.gipl/_RegAtlas/
+	    set NumIterLevel4 = 50
+	    set NumIterLevel2 = 25
+	    set NumIterLevel1 = 15
+	    set WarpingParam = {"--outputImageFilenamePrefix="$OutputImage,"--outputHFieldFilenamePrefix="$dofoutWarp,"--scaleLevel=4 --numberOfIterations="$NumIterLevel4,"--scaleLevel=2 --numberOfIterations="$NumIterLevel2,"--scaleLevel=1 --numberOfIterations="$NumIterLevel1}
+	    if(! -e $dofoutWarp.mhd) then
+		#New Warping tool: fWarp
+		echo Warping of $affineAtlas:t to $skullStrippedT1:t
+		fWarp $WarpingParam $skullStrippedT1 $affineAtlas >! $report
+	    endif
+	 
+	    if(! -e ${OutputImage}2.gipl.gz) then
+		echo Converting to gipl
+		$ImageMathCmd {$OutputImage}2.mhd -constOper 2,1000 -outfile ${OutputImage}2.gipl.gz
+	    endif
+	    echo Zipping back
+	    set WarpImage = {$OutputImage}2.raw
+	    if(-e $WarpImage) gzip -f $WarpImage
+	    set HfieldFile = $dofoutWarp.raw
+	    if(-e $HfieldFile) gzip -f $HfieldFile
+	    if (-e $skullStrippedT1) gzip -f $skullStrippedT1
+	    if (-e $affineAtlas) gzip -f $affineAtlas	   
+
+	else
+	    echo $target Already done
+	endif
+
+    endif
+    @ Pourcentage = $pos * 100
+    set val = `expr $Pourcentage / $numcases`
+    echo Pourcentage done of Warping: $val %
+
+end
+
+echo Warping Atlas to case done
+
+##################################################################
+##################################################################
+
+# QC pictures of the Warping Registration
+
+##################################################################
+##################################################################
+
+
+if($QC_PIC == 1) then
+
+    echo Warping QC picture making process
+    #Make QC pictures
+    set allcases = $ORIG_DATA_DIR/*/Time?/Phantom?/WarpROI/AtlasWarpReg*2.gipl.gz
+
+    foreach case ($allcases)   
+	set OutQC = $case:h/QCPic
+	if(! -e $OutQC) mkdir $OutQC
+	set Outbase = $OutQC/$case:t:s/_regAtlas/./:r:r:r
+	if (! -e {$Outbase}_sliceX.tiff) then
+	    echo  threeslice snapshot $case
+	    ImageStat $case -threeSlice -outbase $Outbase
+	endif
+    end
+
+    echo Making QC pics Done
+    foreach axis (X Y Z)
+	set allcases = $ORIG_DATA_DIR/*/Time?/Phantom?/WarpROI/QCPic/AtlasWarpReg*_slice$axis.tiff
+	foreach i ($allcases)
+	    set T1file = $i:h:h:h/Stripped/QCPic/*T1*slice$axis.tiff
+	    set target = $i:s/_slice/_comb_slice/:r.gif
+	    if (! -e $target) then
+		echo  making Combination $target
+		#This command creates a color image with the 3 channels (RGB) that are the first 3 arguments.
+		$imgConvCmd -combine $i $i $T1file -negate $target
+	    endif
+	end
+
+	set tile = "4x4"
+	set num = 16
+	set size = 150
+	set cmd = ""
+	set count = 0
+	set imageCnt = 0
+	set combimages = $ORIG_DATA_DIR/*/Time?/Phantom?/WarpROI/QCPic/AtlasWarpReg*_comb_slice$axis.gif
+	foreach i ($combimages)	
+	    set case = $i:h:h:h:h:h:t
+	    set caseID = $i:h:h:h:t:s/Phantom//     
+	    set caseTime = $i:h:h:h:h:t
+	    set lbl = $case-Phan$caseID-$caseTime
+	    set update = "$cmd -label $lbl $i"
+	    set cmd = "$update"
+	    @ count = $count + 1
+	    if ($count == $num) then
+		montage +frame +shadow +label -geometry $size -tile $tile $cmd $qcPicDir/QC_AtlasWarp$axis.$imageCnt.jpg
+		echo QC pic name: $qcPicDir/QC_AtlasWarp$axis.$imageCnt.jpg
+		@ imageCnt = $imageCnt + 1
+		set count = 0
+		set cmd = ""
+	    endif
+	end
+	if ($count != 0) then
+	    montage +frame +shadow +label -geometry $size -tile $tile $cmd $qcPicDir/QC_AtlasWarp$axis.$imageCnt.jpg
+	endif
+    end
+
+    echo Collecting Warping QC pics Done
+
+endif
+
+##################################################################
+##################################################################
+
+# The Next step is to apply the 2 transformations to the ROIs
+
+##################################################################
+##################################################################
+echo Applying the transformations to the ROIs
+
+if($Single_Case != 0) then
+    set allcases = $ORIG_DATA_DIR/$single_case/WarpROI
+endif
+if($Single_Case == 0) then
+    set allcases = $ORIG_DATA_DIR/*/Time*/Phantom*/WarpROI
+endif
+
+set Pourcentage = 0
+
+set pos = 0
+set numcases = $#allcases
+set randnum  = `shuf -i 1-{$numcases}`
+
+while($pos != $numcases)
+
+  @ pos = $pos + 1
+
+  if($Random_Mode == 1) then 
+    set case = $allcases[$randnum[$pos]]
+    echo Random case: $case
+  endif
+  if($Random_Mode == 0) then
+    set case = $allcases[$pos]
+    echo case: $case
+  endif
+
+  set ROIdir = $atlasLoc
+    
+  echo Atlas used: $ROIdir
+  set AmygR = $ROIdir/amygdalaRight.gipl
+  set AmygL = $ROIdir/amygdalaLeft.gipl
+  set CaudateR = $ROIdir/caudateRight.gipl
+  set CaudateL = $ROIdir/caudateLeft.gipl
+  set HyppoR = $ROIdir/hippocampusRight.gipl
+  set HyppoL = $ROIdir/hippocampusLeft.gipl
+  set PalliR = $ROIdir/pallidusRight.gipl
+  set PalliL = $ROIdir/pallidusLeft.gipl
+  set PutamenR = $ROIdir/putamenRight.gipl
+  set PutamenL = $ROIdir/putamenLeft.gipl
+  set LatVentRBinMask = $ROIdir/latVentricleRightMask.gipl
+  set LatVentLBinMask = $ROIdir/latVentricleLeftMask.gipl
+
+  set doffile = $case/*_areg.dof
+  #Get all the images
+  set AlreadyDone = $case/*WarpReg*.gipl.gz
+  set NumAlreadyDone = $#AlreadyDone
+
+  if($NumAlreadyDone < 2) then
+
+    #Get the Hfield from the current dir
+    set hfieldfile = $case/*_warp.mhd
+    if(-e $hfieldfile:r.raw.gz) gunzip $hfieldfile:r.raw.gz
+
+    echo Affine param file: $doffile
+    echo Warping param file: $hfieldfile
+    
+    if (-e $doffile & -e $hfieldfile) then
+	echo $case:h/Stripped/
+	set SkullStrippedImage = $case:h/Stripped/*stripped-irescaled.gipl*
+	echo Image Stripped : $SkullStrippedImage
+	if($SkullStrippedImage:e == "gz") then
+	    echo unziping $SkullStrippedImage
+	    gunzip $SkullStrippedImage
+	    set SkullStrippedImage = $SkullStrippedImage:r
+	endif
+
+	set target = $case
+	set name = $doffile:t:s/AtlasAffReg-//:s/stripped-irescaled_areg.dof//
+
+	######### Amygdala Right ################
+	
+	echo Registering Amygdala right
+	
+	set AmygRAff = $target/$name$AmygR:t:s/.gipl/-AffReg.gipl.gz/
+	set AmygRWarp = $target/$name$AmygR:t:s/.gipl/-WarpReg/
+
+	if(! -e $AmygRWarp.gipl.gz) then
+	    if(! -e $AmygRAff || ! -e $AmygRAff:r) then	    
+		echo Affine Transformation
+		$transformCmd $AmygR $AmygRAff:r -dofin $doffile -target $SkullStrippedImage -c1spline
+		gzip -f $AmygRAff:r
+	    endif
+	       
+	    if(! -e $AmygRWarp.gipl.gz) then
+		echo Warping Transformation
+		txApply -h $hfieldfile -b -i $AmygRAff -o $AmygRWarp
+		echo Converting to gipl
+		$convCmd $AmygRWarp.mhd $AmygRWarp.gipl.gz
+	    endif
+	endif
+
+	##########################################
+    
+	######### Amygdala Left ################
+
+	echo Registering Amygala left
+	set AmygLAff = $target/$name$AmygL:t:s/.gipl/-AffReg.gipl.gz/
+	set AmygLWarp = $target/$name$AmygL:t:s/.gipl/-WarpReg/
+
+	if(! -e $AmygLWarp.gipl.gz) then
+	    if(! -e $AmygLAff || ! -e $AmygLAff:r) then	    
+		echo Affine Transformation
+		$transformCmd $AmygL $AmygLAff:r -dofin $doffile -target $SkullStrippedImage -c1spline
+		gzip -f $AmygLAff:r
+	    endif
+	       
+	    if(! -e $AmygLWarp.gipl.gz) then
+		echo Warping Transformation
+		txApply -h $hfieldfile -b -i $AmygLAff -o $AmygLWarp
+		echo Converting to gipl
+		$convCmd $AmygLWarp.mhd $AmygLWarp.gipl.gz
+	    endif
+	endif
+
+	##########################################
+
+	######### Caudate Right ################
+
+	echo Registering Caudate right
+	set CaudateRAff = $target/$name$CaudateR:t:s/.gipl/-AffReg.gipl.gz/
+	set CaudateRWarp = $target/$name$CaudateR:t:s/.gipl/-WarpReg/
+
+	if(! -e $CaudateRWarp.gipl.gz) then
+	    if(! -e $CaudateRAff || ! -e $CaudateRAff:r) then	    
+		echo Affine Transformation
+		$transformCmd $CaudateR $CaudateRAff:r -dofin $doffile -target $SkullStrippedImage -c1spline
+		gzip -f $CaudateRAff:r
+	    endif
+	       
+	    if(! -e $CaudateRWarp.gipl.gz) then
+		echo Warping Transformation
+		txApply -h $hfieldfile -b -i $CaudateRAff -o $CaudateRWarp
+		echo Converting to gipl
+		$convCmd $CaudateRWarp.mhd $CaudateRWarp.gipl.gz
+	    endif
+	endif
+
+	##########################################
+
+	######### Caudate Left ########################
+
+	echo Registering Caudate left
+	set CaudateLAff = $target/$name$CaudateL:t:s/.gipl/-AffReg.gipl.gz/
+	set CaudateLWarp = $target/$name$CaudateL:t:s/.gipl/-WarpReg/
+
+	if(! -e $CaudateLWarp.gipl.gz) then
+	    if(! -e $CaudateLAff || ! -e $CaudateLAff:r) then	    
+		echo Affine Transformation
+		$transformCmd $CaudateL $CaudateLAff:r -dofin $doffile -target $SkullStrippedImage -c1spline
+		gzip -f $CaudateLAff:r
+	    endif
+	       
+	    if(! -e $CaudateLWarp.gipl.gz) then
+		echo Warping Transformation
+		txApply -h $hfieldfile -b -i $CaudateLAff -o $CaudateLWarp
+		echo Converting to gipl
+		$convCmd $CaudateLWarp.mhd $CaudateLWarp.gipl.gz
+	    endif
+	endif
+
+	##########################################
+
+	######### Hyppocampus Right ################
+
+	echo Registering Hyppocampus right
+	set HyppoRAff = $target/$name$HyppoR:t:s/.gipl/-AffReg.gipl.gz/
+	set HyppoRWarp = $target/$name$HyppoR:t:s/.gipl/-WarpReg/
+
+	if(! -e $HyppoRWarp.gipl.gz) then
+	    if(! -e $HyppoRAff || ! -e $HyppoRAff:r) then	    
+		echo Affine Transformation
+		$transformCmd $HyppoR $HyppoRAff:r -dofin $doffile -target $SkullStrippedImage -c1spline
+		gzip -f $HyppoRAff:r
+	    endif
+	       
+	    if(! -e $HyppoRWarp.gipl.gz) then
+		echo Warping Transformation
+		txApply -h $hfieldfile -b -i $HyppoRAff -o $HyppoRWarp
+		echo Converting to gipl
+		$convCmd $HyppoRWarp.mhd $HyppoRWarp.gipl.gz
+	    endif
+	endif
+
+	##########################################
+
+	######### Hyppocampus Left ################
+
+	echo Registering Hyppocampus left
+	set HyppoLAff = $target/$name$HyppoL:t:s/.gipl/-AffReg.gipl.gz/
+	set HyppoLWarp = $target/$name$HyppoL:t:s/.gipl/-WarpReg/
+
+	if(! -e $HyppoLWarp.gipl.gz) then
+	    if(! -e $HyppoLAff || ! -e $HyppoLAff:r) then	    
+		echo Affine Transformation
+		$transformCmd $HyppoL $HyppoLAff:r -dofin $doffile -target $SkullStrippedImage -c1spline
+		gzip -f $HyppoLAff:r
+	    endif
+	       
+	    if(! -e $HyppoLWarp.gipl.gz) then
+		echo Warping Transformation
+		txApply -h $hfieldfile -b -i $HyppoLAff -o $HyppoLWarp
+		echo Converting to gipl
+		$convCmd $HyppoLWarp.mhd $HyppoLWarp.gipl.gz
+	    endif
+	endif
+
+	##########################################
+
+	######### Pallidus Right ################
+
+	echo Registering Pallidus right	
+	set PalliRAff = $target/$name$PalliR:t:s/.gipl/-AffReg.gipl.gz/
+	set PalliRWarp = $target/$name$PalliR:t:s/.gipl/-WarpReg/
+
+	if(! -e $PalliRWarp.gipl.gz) then
+	    if(! -e $PalliRAff || ! -e $PalliRAff:r) then	    
+		echo Affine Transformation
+		$transformCmd $PalliR $PalliRAff:r -dofin $doffile -target $SkullStrippedImage -c1spline
+		gzip -f $PalliRAff:r
+	    endif
+	       
+	    if(! -e $PalliRWarp.gipl.gz) then
+		echo Warping Transformation
+		txApply -h $hfieldfile -b -i $PalliRAff -o $PalliRWarp
+		echo Converting to gipl
+		$convCmd $PalliRWarp.mhd $PalliRWarp.gipl.gz
+	    endif
+	endif
+
+	##########################################
+
+	######### Pallidus Left ################
+
+	echo Registering Pallidus left
+	set PalliLAff = $target/$name$PalliL:t:s/.gipl/-AffReg.gipl.gz/
+	set PalliLWarp = $target/$name$PalliL:t:s/.gipl/-WarpReg/
+
+	if(! -e $PalliLWarp.gipl.gz) then
+	    if(! -e $PalliLAff || ! -e $PalliLAff:r) then	    
+		echo Affine Transformation
+		$transformCmd $PalliL $PalliLAff:r -dofin $doffile -target $SkullStrippedImage -c1spline
+		gzip -f $PalliLAff:r
+	    endif
+	       
+	    if(! -e $PalliLWarp.gipl.gz) then
+		echo Warping Transformation
+		txApply -h $hfieldfile -b -i $PalliLAff -o $PalliLWarp
+		echo Converting to gipl
+		$convCmd $PalliLWarp.mhd $PalliLWarp.gipl.gz
+	    endif
+	endif
+
+	########################################## 
+
+	######### Putamen Right ################
+
+	echo Registering Putamen right
+	set PutamenRAff = $target/$name$PutamenR:t:s/.gipl/-AffReg.gipl.gz/
+	set PutamenRWarp = $target/$name$PutamenR:t:s/.gipl/-WarpReg/
+
+	if(! -e $PutamenRWarp.gipl.gz) then
+	    if(! -e $PutamenRAff || ! -e $PutamenRAff:r) then	    
+		echo Affine Transformation
+		$transformCmd $PutamenR $PutamenRAff:r -dofin $doffile -target $SkullStrippedImage -c1spline
+		gzip -f $PutamenRAff:r
+	    endif
+	       
+	    if(! -e $PutamenRWarp.gipl.gz) then
+		echo Warping Transformation
+		txApply -h $hfieldfile -b -i $PutamenRAff -o $PutamenRWarp
+		echo Converting to gipl
+		$convCmd $PutamenRWarp.mhd $PutamenRWarp.gipl.gz
+	    endif
+	endif
+
+	##########################################
+
+	######### Putamen Left ################
+
+	echo Registering Putamen left		
+	set PutamenLAff = $target/$name$PutamenL:t:s/.gipl/-AffReg.gipl.gz/
+	set PutamenLWarp = $target/$name$PutamenL:t:s/.gipl/-WarpReg/
+
+	if(! -e $PutamenLWarp.gipl.gz) then
+	    if(! -e $PutamenLAff || ! -e $PutamenLAff:r) then	    
+		echo Affine Transformation
+		$transformCmd $PutamenL $PutamenLAff:r -dofin $doffile -target $SkullStrippedImage -c1spline
+		gzip -f $PutamenLAff:r
+	    endif
+	       
+	    if(! -e $PutamenLWarp.gipl.gz) then
+		echo Warping Transformation
+		txApply -h $hfieldfile -b -i $PutamenLAff -o $PutamenLWarp
+		echo Converting to gipl
+		$convCmd $PutamenLWarp.mhd $PutamenLWarp.gipl.gz
+	    endif
+	endif
+
+	##########################################
+
+	################## Lateral Ventricules ###################
+	#For the lat ventricules the process is different.
+	#As we can't use the probabilistic map, we use the 
+	#binary mask and apply only a NN interpolation for 
+	# the affine and for the warping.
+	#########################################################
+	################### Lat Vent Right ######################
+
+	echo Registering Lat Ventricule Right
+	set LatVentRAff = $target/$name$LatVentRBinMask:t:s/.gipl/-AffReg-BinMask.gipl.gz/
+	set LatVentRWarp = $target/$name$LatVentRBinMask:t:s/.gipl/-WarpReg-BinMask/
+
+	if(! -e $LatVentRWarp.gipl.gz) then
+	    if(! -e $LatVentRAff || ! -e $LatVentRAff:r) then	    
+		echo Affine Transformation
+		$transformCmd $LatVentRBinMask $LatVentRAff:r -dofin $doffile -target $SkullStrippedImage
+		gzip -f $LatVentRAff:r
+	    endif
+	       
+	    if(! -e $LatVentRWarp.gipl.gz) then
+		echo Warping Transformation
+		txApply -h $hfieldfile -b -i $LatVentRAff -o $LatVentRWarp -n
+		echo Converting to gipl
+		$convCmd $LatVentRWarp.mhd $LatVentRWarp.gipl.gz
+	    endif
+	endif
+
+	##########################################
+
+	################### Lat Vent Left ######################
+
+	echo Registering Lat Ventricule Left
+	set LatVentLAff = $target/$name$LatVentLBinMask:t:s/.gipl/-AffReg-BinMask.gipl.gz/
+	set LatVentLWarp = $target/$name$LatVentLBinMask:t:s/.gipl/-WarpReg-BinMask/
+
+	if(! -e $LatVentLWarp.gipl.gz) then
+	    if(! -e $LatVentLAff || ! -e $LatVentLAff:r) then	    
+		echo Affine Transformation
+		$transformCmd $LatVentLBinMask $LatVentLAff:r -dofin $doffile -target $SkullStrippedImage
+		gzip -f $LatVentLAff:r
+	    endif
+	       
+	    if(! -e $LatVentLWarp.gipl.gz) then
+		echo Warping Transformation
+		txApply -h $hfieldfile -b -i $LatVentLAff -o $LatVentLWarp -n
+		echo Converting to gipl
+		$convCmd $LatVentLWarp.mhd $LatVentLWarp.gipl.gz
+	    endif
+	endif
+
+	##########################################################
+
+    endif
+    
+    #Zip the images
+    if(-e $SkullStrippedImage) gzip -f $SkullStrippedImage  
+    echo zipping the hfield
+    if(-e $hfieldfile:r.raw) gzip -f $hfieldfile:r.raw
+    echo zipping the hfield done
+
+  endif
+
+  @ Pourcentage = $pos * 100
+  set val = `expr $Pourcentage / $numcases`
+  echo Pourcentage done for Registering ROIs: $val %
+
+end
+echo Registering the ROIs done
+
+
+
+################################################################################################
+################################################################################################
+
+# The next step is just applied to the lateral ventricules. As their segmentation is not so good,
+# we need to take the intersection between the lat vent from the previous step and the CSF
+# ems segmentation (label 3)
+
+################################################################################################
+################################################################################################
+
+echo Get the Lateral ventricules
+
+set CSFLabel = 3
+
+if(Single_Case == 1) then
+    set allcases = $ORIG_DATA_DIR/$single_case/WarpROI
+endif
+if(Single_Case == 0) then
+    set allcases = $ORIG_DATA_DIR/*/Time*/Phantom*/WarpROI
+endif
+
+set Pourcentage = 0
+
+set pos = 0
+set numcases = $#allcases
+set randnum  = `shuf -i 1-{$numcases}`
+
+while($pos != $numcases)
+
+  @ pos = $pos + 1
+
+  if($Random_Mode == 1) then 
+    set case = $allcases[$randnum[$pos]]
+    echo Random case: $case
+  endif
+  if($Random_Mode == 0) then
+    set case = $allcases[$pos]
+    echo case: $case
+  endif
+
+  set LatVentRight = $case/*latVentricleRightMask-WarpReg-BinMask.gipl.gz
+  set LatVentLeft = $case/*latVentricleLeftMask-WarpReg-BinMask.gipl.gz
+   
+  echo Lat Vent Right: $LatVentRight    
+  echo Lat Vent Left: $LatVentLeft
+  
+  set tmp1 = $case/temp1.gipl.gz
+  set tmp2 = $case/temp2.gipl.gz
+
+  set CSFProbMap = $case:h/$EMSDir/*posterior2_EMS.gipl.gz
+  echo CSF Map : $CSFProbMap
+  set LatVentRightOutfile = $LatVentRight:s/-WarpReg-BinMask.gipl.gz/-WarpReg.gipl.gz/
+  set LatVentLeftOutfile = $LatVentLeft:s/-WarpReg-BinMask.gipl.gz/-WarpReg.gipl.gz/
+
+  echo Lat Vent Output Names: $LatVentRightOutfile     $LatVentLeftOutfile
+
+  #The EMS segmentation is scaled up to 1024, so we have to rescale the output image to 256
+  #If the EMS Scaling is 32767 (2^15) we have to divide by 128
+
+  if(! -e $LatVentRightOutfile | ! -e $LatVentLeftOutfile) then
+    set coeff = 128
+    if(! -e $LatVentRightOutfile) then
+	echo Masking CSF probabilistic map with the right ventricule probabilistic 
+	$ImageMathCmd $CSFProbMap -mask $LatVentRight -outfile $tmp1
+	#And then rescale it to 256
+	$ImageMathCmd $tmp1 -constOper 3,$coeff -outfile $LatVentRightOutfile
+    endif
+    if(! -e $LatVentLeftOutfile) then
+	echo Masking CSF probabilistic map with the left ventricule probabilistic
+	$ImageMathCmd $CSFProbMap -mask $LatVentLeft -outfile $tmp2
+	#And then rescale it to 256
+	$ImageMathCmd $tmp2 -constOper 3,$coeff -outfile $LatVentLeftOutfile
+
+    endif
+ 
+   if(-e $tmp1) rm -f $tmp1
+   if(-e $tmp2) rm -f $tmp2
+  endif
+
+  @ Pourcentage = $pos * 100
+  set val = `expr $Pourcentage / $numcases`
+  echo Pourcentage done for Ventricules segmented: $val %
+
+  echo Ventricules segmented
+
+end
+
+
+######################################################################
+######################################################################
+
+# The next step is to thershold all the probabilistic volume at 127
+# to get the hard segmentation
+
+######################################################################
+######################################################################
+
+echo Thresholding the ROIs
+
+if(Single_Case == 1) then
+    set allcases = $ORIG_DATA_DIR/$single_case/WarpROI
+endif
+if(Single_Case == 0) then
+    set allcases = $ORIG_DATA_DIR/*/Time*/Phantom*/WarpROI
+endif
+
+set Pourcentage = 0
+
+set pos = 0
+set numcases = $#allcases
+set randnum  = `shuf -i 1-{$numcases}`
+
+while($pos != $numcases)
+
+  @ pos = $pos + 1
+
+  if($Random_Mode == 1) then 
+    set case = $allcases[$randnum[$pos]]
+    echo Random case: $case
+  endif
+  if($Random_Mode == 0) then
+    set case = $allcases[$pos]
+    echo case: $case
+  endif
+  
+  echo Thresholding ROIs of $case
+  foreach ROIcase ($case/*-WarpReg.gipl.gz)
+
+    if(-e $ROIcase:s/.gipl.gz/.raw/) then
+	echo zipping the raw data
+	gzip $ROIcase:s/.gipl.gz/.raw/
+    endif
+
+    echo Thresholding $ROIcase
+    set Outfile = $ROIcase:s/-WarpReg.gipl.gz/-WarpReg-HardSeg.gipl.gz/
+    if(! -e $Outfile) then
+	$ImageMathCmd $ROIcase -threshold 127,256 -outfile $Outfile
+    endif
+  end
+  
+  @ Pourcentage = $pos * 100
+  set val = `expr $Pourcentage / $numcases`
+  echo Pourcentage done for Ventricules segmented: $val %
+
+end
+
+echo Thresholding done
+
+
+###########################################################
+###########################################################
+
+#The next step is to create one file with all the ROIs
+
+###########################################################
+###########################################################
+
+echo Gathering the ROIs
+
+if(Single_Case == 1) then
+    set allcases = $ORIG_DATA_DIR/$single_case/WarpROI
+endif
+if(Single_Case == 0) then
+    set allcases = $ORIG_DATA_DIR/*/Time*/Phantom*/WarpROI
+endif
+
+set Pourcentage = 0
+
+set pos = 0
+set numcases = $#allcases
+set randnum  = `shuf -i 1-{$numcases}`
+
+while($pos != $numcases)
+
+  @ pos = $pos + 1
+
+  if($Random_Mode == 1) then 
+    set case = $allcases[$randnum[$pos]]
+    echo Random case: $case
+  endif
+  if($Random_Mode == 0) then
+    set case = $allcases[$pos]
+    echo case: $case
+  endif
+  
+  echo Gathering all the ROIs into one file
+
+  set tmp = $case/AtlasWarp*_corrected_EMS-stripped-irescaled_RegAtlas2.mhd
+  set AllROIsFile = $tmp:s/.mhd/-AllROI.gipl.gz/
+
+  if(! -e $AllROIsFile) then
+    echo Current case: $case
+    #Get the list of all the ROIs
+    set ROIsList = $case/*-WarpReg-HardSeg.gipl.gz
+    set numROI = $#ROIsList
+    
+    #Create the final image
+    cp $ROIsList[1] $AllROIsFile
+
+    if($numROI == 12) then
+	set num = 1
+
+	while ($num != $numROI)
+	    @ num = $num + 1	    
+	    echo Adding $ROIsList[$num]
+	    $ImageMathCmd $AllROIsFile -combine $ROIsList[$num] -relabel -outfile $AllROIsFile    
+	end
+    else
+	echo Not All the ROIs are available
+    endif
+  endif
+
+  @ Pourcentage = $pos * 100
+  set val = `expr $Pourcentage / $numcases`
+  echo Pourcentage done for Gathering: $val % 
+
+end
+
+
+############################################################
+############################################################
+
+# QC pictures of the result
+
+############################################################
+############################################################
+
+
+if($QC_PIC == 1) then
+
+    echo Label map QC picture making process
+    #Make QC pictures
+    set allcases = $ORIG_DATA_DIR/*/Time*/Phantom*/WarpROI/AtlasWarpReg*AllROI.gipl.gz
+   
+    foreach case ($allcases)  
+	set OutQC = $case:h/QCPic
+	if(! -e $OutQC) mkdir $OutQC
+	set Outbase = $OutQC/$case:t:s/_regAtlas/./:r:r:r_AllROI
+	if (! -e {$Outbase}_sliceX.tiff) then
+	    echo  threeslice snapshot $case
+	    ImageStat $case -threeSlice -outbase $Outbase
+	endif
+	set StrippedIm = $case:h:h/Stripped/*-stripped.gipl.gz
+	set OutQC = $case:h/QCPic
+	if(! -e $OutQC) mkdir $OutQC
+	set Outbase = $OutQC/$case:t:s/_regAtlas/./:r:r:r
+	if(! -e {$Outbase}_sliceX.tiff) then
+	    ImageStat $StrippedIm -threeSlice -outbase $Outbase
+	endif
+    end
+
+    echo Making QC pics Done
+
+    foreach axis (X Y Z)
+	set allcases = $ORIG_DATA_DIR/*/Time*/Phantom*/WarpROI/QCPic/AtlasWarpReg*AllROI_slice$axis.tiff
+        foreach i ($allcases)
+	    set T1file = $i:h:h:h/Stripped/QCPic/T1*slice$axis.tiff
+	    set target = $i:s/_slice/_comb_slice/:r.gif
+	    if (! -e $target) then
+		echo  making Combination $target
+		#This command creates a color image with the 3 channels (RGB) that are the first 3 arguments.
+		$imgConvCmd -combine $i $i $T1file -negate  $target
+	    endif
+	end
+
+    set tile = "4x4"
+    set num = 16
+    set size = 150
+    set cmd = ""
+    set count = 0
+    set imageCnt = 0
+    set combimages = $ORIG_DATA_DIR/*/Time*/Phantom*/WarpROI/QCPic/AtlasWarpReg*AllROI_comb_slice$axis.gif
+    
+    foreach i ($combimages)
+	set case = $i:h:h:h:h:h:t
+	set caseID = $i:h:h:h:t:s/Phantom//     
+	set caseTime = $i:h:h:h:h:t
+	set lbl = $case-Phan$caseID-$caseTime
+	set update = "$cmd -label $lbl $i"
+	set cmd = "$update"
+	@ count = $count + 1
+	if ($count == $num) then
+	    montage +frame +shadow +label -geometry $size -tile $tile $cmd $qcPicDir/QC_AtlasWarpAllROI$axis.$imageCnt.jpg
+	    @ imageCnt = $imageCnt + 1
+	    set count = 0
+	    set cmd = ""
+	endif
+    end
+    if ($count != 0) then
+	montage +frame +shadow +label -geometry $size -tile $tile $cmd $qcPicDir/QC_AtlasWarpAllROI$axis.$imageCnt.jpg
+    endif
+    end
+
+    echo Collecting Label map QC pics Done
+
+endif
+
+############################################################
+############################################################
+
+# Extracting Volume Information 
+
+############################################################
+############################################################
+
+
+if($VOL == 1) then
+	set target = $ORIG_DATA_DIR/autosegVol-ems1.7.csv
+	set allDir = $ORIG_DATA_DIR/{$SUBJ_DIR_PREFIX}/{$CASE_DIR}
+	echo 'Statistics of the automatic Ventricules Segmentation' > $target
+	echo >> $target
+	foreach case ($allDir)
+		set allFiles = $case/WarpROI/*HardSeg.gipl.gz
+		echo '\n'Case $case:h:t - $case:t:s/-anatomical// >> $target
+		foreach file ($allFiles)
+			ImageStat $file -histo
+			set VolFile = $file:s/.gipl.gz/_vol.txt/
+                	set AllVolInfo = `grep 'VolumeFullRatio' $VolFile`
+			set VolumeVal = $AllVolInfo[3]
+			set VolumeVal = $VolumeVal:s/;//
+			set Label=$file:t:s/anat_0001_rai_regAtlas_corrected_EMS--//:s/anat_001_rai_regAtlas_corrected_EMS--//:s/-WarpReg-HardSeg.gipl.gz//:s/Mask//
+			echo Label '\t' $Label '\t' NbVox '\t' $VolumeVal >> $target
+			echo Volume Calculation of  $case:h:t  $case:t:s/-anatomical// $Label done
+		end
+	end
+endif
+
+
+echo THE END

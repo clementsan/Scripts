@@ -1,0 +1,50 @@
+#!/usr/bin/tcsh -f
+
+echo "Input the DWI file: (in nhdr format)"
+set case_dwi = $<
+
+echo "Generating IDWI and B0.."
+set case_B0 = $case_dwi:t:s/.nhdr/_B0.nrrd/
+set case_IDWI = $case_dwi:t:s/.nhdr/_IDWI.nrrd/		
+set case_temp = $case_dwi:t:s/.nhdr/_temp.nrrd/		
+dtiestim --dwi_image $case_dwi --B0 $case_B0 --idwi $case_IDWI --tensor_output $case_temp
+
+	set case_B0_nii = $case_B0:t:s/.nrrd/.nii/
+	convertITKformats $case_B0 $case_B0_nii
+
+	set case_B0_nii_gz = $case_B0_nii:t:s/.nii/.nii.gz/
+	ImageMath $case_B0_nii -outfile $case_B0_nii_gz -constOper 3,10000 -type float
+
+	rm $case_B0_nii
+
+	set case_B0_bet = $case_B0_nii_gz:t:s/.nii.gz/_bet/
+	bet2 $case_B0_nii_gz $case_B0_bet -m
+
+	set case_B0_bet_mask = $case_B0_bet:t:s/_bet/_bet_mask.nii.gz/
+	InsightSNAP_2.0 -g $case_B0_nii_gz -s $case_B0_bet_mask 
+
+	echo "Edit mask in Insight SNAP and save output as brainmask.nrrd..."
+	echo "To try a different method for skull stripping, press 1..."
+
+	set MaskChk = $<
+
+	if ($MaskChk == 1)  then
+	
+		set case_IDWI_nii = $case_IDWI:t:s/.nrrd/.nii/
+		convertITKformats $case_IDWI $case_IDWI_nii
+
+		set case_IDWI_nii_gz = $case_IDWI_nii:t:s/.nii/.nii.gz/
+		ImageMath $case_IDWI_nii -outfile $case_IDWI_nii_gz -constOper 3,10000 -type float
+
+		rm $case_IDWI_nii
+
+		set case_IDWI_bet = $case_IDWI_nii_gz:t:s/.nii.gz/_bet/
+		bet2 $case_IDWI_nii_gz $case_IDWI_bet -m
+
+		set case_IDWI_bet_mask = $case_IDWI_bet:t:s/_bet/_bet_mask.nii.gz/
+		InsightSNAP_2.0 -g $case_IDWI_nii_gz -s $case_IDWI_bet_mask 
+
+		echo "Edit mask in Insight SNAP and save output as brainmask.nrrd..."
+		set temp = $<
+	endif
+

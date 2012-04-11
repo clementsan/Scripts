@@ -1,0 +1,39 @@
+#!/usr/local/bin/tcsh -f
+
+set Parcellation = Parcellation_large_right_init_edited.nrrd
+set NewParcellation = Parcellation_large.nrrd
+
+set RightLabelList = (1 2 3 4 5 6 7 8 17 20 22 24 26)
+set LeftLabelList = (9 19 11 12 13 14 15 16 18 21 23 25 27)
+
+
+echo 'Copying current parcellation..'
+cp $Parcellation $NewParcellation
+
+set Iterator = 1
+foreach label ($RightLabelList)
+   echo 'RightLabel: ' $label
+   echo 'RightLabelCheck: ' $RightLabelList[$Iterator]
+  
+   set LeftLabel = $LeftLabelList[$Iterator]
+   echo 'LeftLabel: ' $LeftLabel
+ 
+   echo '\t\t Extracting right label...'
+   set RightParcellationLabel = $Parcellation:r_Label_${label}.gipl
+   ImageMath $Parcellation -extractLabel $label -outfile $RightParcellationLabel
+
+   echo '\t\t Creating left label...'
+   set LeftParcellationLabel = $Parcellation:r_Label_${LeftLabel}.gipl
+   imconvert3 $RightParcellationLabel $LeftParcellationLabel -setorient RAI-LAI
+   ImageMath $LeftParcellationLabel -constOper 2,$LeftLabel -outfile $LeftParcellationLabel
+
+   echo '\t\t Adding left label to symmetric parcellation...'
+   ImageMath $NewParcellation -combine $LeftParcellationLabel -outfile $NewParcellation
+
+   rm $RightParcellationLabel $LeftParcellationLabel
+
+ @ Iterator ++
+end
+
+
+

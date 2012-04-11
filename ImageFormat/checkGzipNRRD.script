@@ -1,0 +1,12 @@
+#!/bin/tcsh
+foreach i (`find . -type f | grep .nrrd`)
+#  echo $i
+  set j=(`unu head $i | grep encoding`)
+  if( $j[2] == "raw" ) then
+    echo $i
+    unu save -i $i -e gzip -f nrrd -o $i
+  endif
+#  if( -d $j/DWIProcManual ) then
+#    echo $i
+#  endif
+end
