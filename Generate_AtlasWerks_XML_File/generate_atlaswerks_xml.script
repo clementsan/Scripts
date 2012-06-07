@@ -1,0 +1,248 @@
+#!/usr/bin/tcsh -f
+
+#Description: This script can be used as tool to generate the xml file to run AtlasWerks
+# Initial script from Sylvain Gouttard
+
+#The option needed as an input are:
+# - The xml file output name
+# - List of images for the atlas
+# - Their associated ITK affine transformations
+# - The number of subsampling steps
+# - The number of iterations for each of them
+# - The template names for:
+#    * Average image
+#    * Deformed images
+#    * Deformation fields
+#    * Inverse Deformation fields
+
+if($1 == "--help") then
+    echo "Usage: generate_atlaswerks_xml.script generatedxml.xml nboffiles im1 im2 ... [-aff aff1 aff2 ...] nbsubsampling subsamp1 iter1 subsamp2 iter2 ... atlasimagename deformedimagename deformationfields invdeformationfields"
+    echo "The affine list is optional if no affines are input"
+    exit
+endif
+
+set nb_total_arg = $#argv
+
+set cpt = 1
+set AtlasWerksfile = $argv[$cpt]
+@ cpt += 1
+set nb_files = $argv[$cpt]
+@ cpt += 1
+
+#All input images
+set allinputimages = ""
+@ list_file_end = $nb_files + $cpt
+while ($cpt < $list_file_end)
+    set allinputimages = ($allinputimages $argv[$cpt])
+    @ cpt += 1
+end
+echo $allinputimages
+
+#All affine inputs
+set nextarg = $argv[$cpt]
+
+set affine = 0
+set allinputaffine = ""
+if($nextarg == "-aff") then
+    set affine = 1
+    @ cpt += 1
+    @ list_file_end = $nb_files + $cpt
+    while ($cpt < $list_file_end)
+	set allinputaffine = ($allinputaffine $argv[$cpt])
+	@ cpt += 1
+    end
+else
+    echo "No affine files detected"
+endif
+echo $allinputaffine
+
+#Number of subsampling, factor and iterations
+set nb_sub_sampling = $argv[$cpt]
+@ cpt += 1
+
+set subsampling = ""
+set nbiter = ""
+set sub_index = 1
+while($sub_index <= $nb_sub_sampling) 
+    set subsampling = ($subsampling $argv[$cpt])
+    @ cpt += 1
+    set nbiter = ($nbiter $argv[$cpt])
+    @ cpt += 1
+    @ sub_index += 1
+end
+echo subsamp $subsampling
+echo nbiter $nbiter
+
+#Get the template names
+@ tmp = $cpt - 1
+if($tmp < $nb_total_arg) then
+    set averagename = $argv[$cpt]
+    @ cpt += 1
+    @ tmp = $cpt - 1
+else
+    set averagename = "GreedyMeanImage"
+endif
+
+if($tmp < $nb_total_arg) then
+    set deformedimagename = $argv[$cpt]
+    @ cpt += 1
+    @ tmp = $cpt - 1
+else
+    set deformedimagename = "deformed_image_"
+endif
+
+if($tmp < $nb_total_arg) then
+    set deformationfieldsname = $argv[$cpt]
+    @ cpt += 1
+    @ tmp = $cpt - 1
+else
+    set deformationfieldsname = "deformation_field_"
+endif
+
+if($tmp < $nb_total_arg) then
+    set invdeformationfieldsname = $argv[$cpt]
+    @ cpt += 1
+    @ tmp = $cpt - 1
+else
+    set invdeformationfieldsname = "inv_deformation_field_"
+endif
+
+
+echo $averagename
+echo $deformedimagename
+echo $deformationfieldsname
+echo $invdeformationfieldsname
+
+#Writing down all the info
+echo '<ParameterFile>' >! $AtlasWerksfile
+
+	echo '\t''<\!--Specify a set of input images, possibly weighted-->' >> $AtlasWerksfile
+	echo '\t''<WeightedImageSet>' >> $AtlasWerksfile
+		echo '\t''\t''<\!--printf-style format string-->' >> $AtlasWerksfile
+		echo '\t''\t''<InputImageFormatString>' >> $AtlasWerksfile
+			echo '\t''\t''\t''<\!--filename format, expects single integer format (%d or %0d)-->' >> $AtlasWerksfile
+			echo '\t''\t''\t''<FormatString val="%f" />' >> $AtlasWerksfile
+			echo '\t''\t''\t''<\!--Minimum image index-->' >> $AtlasWerksfile
+			echo '\t''\t''\t''<Base val="0" />' >> $AtlasWerksfile
+			echo '\t''\t''\t''<\!--Number of files to read in (filnames from Base to NumImages-1)-->' >> $AtlasWerksfile
+			echo '\t''\t''\t''<NumFiles val="0" />' >> $AtlasWerksfile
+			echo '\t''\t''\t''<\!--Weight given to each of the input images-->' >> $AtlasWerksfile
+			echo '\t''\t''\t''<Weight val="1" />' >> $AtlasWerksfile
+		echo '\t''\t''</InputImageFormatString>' >> $AtlasWerksfile
+
+		set index = 1
+		echo '\t''\t''<\!--Multiple of the following can occur...-->' >> $AtlasWerksfile
+		foreach case ($allinputimages)		    
+		    echo '\t''\t''<\!--A weighted input image file-->' >> $AtlasWerksfile
+		    echo '\t''\t''<WeightedImage>' >> $AtlasWerksfile
+		    echo '\t''\t''\t''<\!--input image filename-->' >> $AtlasWerksfile
+		    echo '\t''\t''\t''<Filename val="'$case'" />' >> $AtlasWerksfile
+		    echo '\t''\t''\t''<\!--input image weight-->' >> $AtlasWerksfile
+		    echo '\t''\t''\t''<Weight val="1" />' >> $AtlasWerksfile
+		    echo '\t''\t''\t''<\!--filename of affine transform image-->' >> $AtlasWerksfile
+		    if($affine) then
+			set linearFile = $allinputaffine[$index]
+			echo '\t''\t''\t''<Transform val="'$linearFile'" />' >> $AtlasWerksfile
+		    else
+			echo '\t''\t''\t''<Transform val="" />' >> $AtlasWerksfile
+		    endif
+		    echo '\t''\t''\t''<\!--is this an ITK-style transform file vs. an AffineTransform3D-style file?-->' >> $AtlasWerksfile
+		    echo '\t''\t''\t''<ItkTransform val="true" />' >> $AtlasWerksfile
+		    echo '\t''\t''</WeightedImage>' >> $AtlasWerksfile
+		    @ index += 1
+		end
+		echo '\t''\t''<\!--If true, scale the image weights to 1.0-->' >> $AtlasWerksfile
+		echo '\t''\t''<ScaleImageWeights val="true" />' >> $AtlasWerksfile
+
+	echo '\t''</WeightedImageSet>' >> $AtlasWerksfile
+		
+	echo '\t''<\!--A weighted input image file-->' >> $AtlasWerksfile
+	echo '\t''<ImagePreprocessor>' >> $AtlasWerksfile
+	echo '\t''\t''<\!--Intensity window used for rescaling (image min/max used if no intensity window specified)-->' >> $AtlasWerksfile
+		echo '\t''\t''<IntensityWindow>' >> $AtlasWerksfile
+			echo '\t''\t''\t''<\!--Perform intensity rescaling?-->' >> $AtlasWerksfile
+			echo '\t''\t''\t''<RescaleIntensities val="true" />' >> $AtlasWerksfile
+			echo '\t''\t''\t''<\!--Use this intensity window instead of image min/max intensity-->' >> $AtlasWerksfile
+			echo '\t''\t''\t''<UseInputIntensityWindow val="false" />' >> $AtlasWerksfile
+			echo '\t''\t''\t''<\!--input window min-->' >> $AtlasWerksfile
+			echo '\t''\t''\t''<InputWindowMin val="0" />' >> $AtlasWerksfile
+			echo '\t''\t''\t''<\!--input window max-->' >> $AtlasWerksfile
+			echo '\t''\t''\t'' <InputWindowMax val="1" />' >> $AtlasWerksfile
+			echo '\t''\t''\t''<\!--output window min-->' >> $AtlasWerksfile
+			echo '\t''\t''\t''<OutputWindowMin val="0" />' >> $AtlasWerksfile
+			echo '\t''\t''\t''<\!--output window max-->' >> $AtlasWerksfile
+			echo '\t''\t''\t''<OutputWindowMax val="1" />' >> $AtlasWerksfile
+		echo '\t''\t''</IntensityWindow>' >> $AtlasWerksfile
+		echo '\t''\t''<\!--Set the spacing of input images to (1,1,1) (no resampling)-->' >> $AtlasWerksfile
+		echo '\t''\t''<SetUnitSpacing val="false" />' >> $AtlasWerksfile
+		echo '\t''\t''<\!--Set the origin of input images to (0,0,0)-->' >> $AtlasWerksfile
+		echo '\t''\t''<SetZeroOrigin val="false" />' >> $AtlasWerksfile
+	echo '\t''</ImagePreprocessor>' >> $AtlasWerksfile
+	
+	echo '\t''<\!--Multiple of the following can occur...-->' >> $AtlasWerksfile
+	
+	
+	set index = 1
+	foreach scaleLvl ($subsampling)
+	    set nbI = $nbiter[$index]
+	    echo '\t''<\!--Settings for a single scale level of greedy atlas building-->' >> $AtlasWerksfile
+	    echo '\t''<GreedyAtlasScaleLevel>' >> $AtlasWerksfile
+	    echo '\t''\t''<\!--Number of iterations to run-->' >> $AtlasWerksfile
+	    echo '\t''\t''<NIterations val="'$nbI'" />' >> $AtlasWerksfile #############
+	    echo '\t''\t''<\!--Differential operator parameters-->' >> $AtlasWerksfile
+	    echo '\t''\t''<DiffOper>' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<\!--Controls the 'viscosity' of the fluid-->' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<Alpha val="0.1" />' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<\!--Controls the 'viscosity' of the fluid (penalizes expansion/compression)-->' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<Beta val="0.1" />' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<\!--ensures inverability of the operator-->' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<Gamma val="0.01" />' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<\!--'power' of L to use-->' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<LPow val="1" />' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<\!--Use lookup table of eigenvalues, trades memory for speed-->' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<UseEigenLUT val="true" />' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<\!--Compute a divergence-free deformation-->' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<DivergenceFree val="false" />' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<\!--Number of threads for FFTW library to use-->' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<FFTWNumberOfThreads val="1" />' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<\!--Do performance measuring during plan construction-->' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<FFTWMeasure val="true" />' >> $AtlasWerksfile
+	    echo '\t''\t''</DiffOper>' >> $AtlasWerksfile
+		    
+	    echo '\t''\t''<\!--Scale factor on the maximum velocity in a given deformation for computing delta-->' >> $AtlasWerksfile
+	    echo '\t''\t''<MaxPert val="0.3" />' >> $AtlasWerksfile
+	    echo '\t''\t''<\!--Update the average after each deformation is updated?-->' >> $AtlasWerksfile
+	    echo '\t''\t''<UpdateAfterSubIteration val="false" />' >> $AtlasWerksfile
+	    echo '\t''\t''<\!--Use the mean maximum velocity across all images to compute delta step for all deformations. If this is false the maximum velocity in each vector field will be used for the delta computation for that deformation-->' >> $AtlasWerksfile
+	    echo '\t''\t''<DeltaSelectionUseMean val="false" />' >> $AtlasWerksfile
+	    echo '\t''\t''<\!--setting for a single scale level-->' >> $AtlasWerksfile
+	    echo '\t''\t''<ScaleLevel>' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<\!--factor by which to downsample images-->' >> $AtlasWerksfile
+	    echo '\t''\t''\t''<DownsampleFactor val="'$scaleLvl'" />' >> $AtlasWerksfile ###########
+	    echo '\t''\t''</ScaleLevel>' >> $AtlasWerksfile
+	    echo '\t''</GreedyAtlasScaleLevel>' >> $AtlasWerksfile
+
+	    @ index += 1
+	end
+
+	echo '\t''<\!--Compute atlas on the GPU.  Only a subset of normal settings are applicable-->' >> $AtlasWerksfile
+	echo '\t''<UseGPU val="false" />' >> $AtlasWerksfile
+	echo '\t''<\!--If UseGPU is true, use this many GPUs (0 lets the system self-select)-->' >> $AtlasWerksfile
+	echo '\t''<nGPUs val="0" />' >> $AtlasWerksfile
+	echo '\t''<\!--number of threads to use, 0=one per processor (only for CPU computation)-->' >> $AtlasWerksfile
+	echo '\t''<nThreads val="0" />' >> $AtlasWerksfile
+	echo '\t''<\!--If true, scale the image weights to 1.0-->' >> $AtlasWerksfile
+	echo '\t''<ScaleImageWeights val="true" />' >> $AtlasWerksfile
+	echo '\t''<\!--prefix for the mean image-->' >> $AtlasWerksfile
+	echo '\t''<OutputImageNamePrefix val="'$averagename'" />' >> $AtlasWerksfile
+	echo '\t''<\!--prefix for each of the deformed images-->' >> $AtlasWerksfile
+	echo '\t''<OutputDeformedImageNamePrefix val="'$deformedimagename'" />' >> $AtlasWerksfile
+	echo '\t''<\!--prefix for each of the deformation fields-->' >> $AtlasWerksfile
+	echo '\t''<OutputHFieldImageNamePrefix val="'$deformationfieldsname'" />' >> $AtlasWerksfile
+	echo '\t''<\!--prefix for each of the inverse deformation fields-->' >> $AtlasWerksfile
+	echo '\t''<OutputInvHFieldImageNamePrefix val="'$invdeformationfieldsname'" />' >> $AtlasWerksfile
+	echo '\t''<\!--filename extension to use (determines format)-->' >> $AtlasWerksfile
+	echo '\t''<OutputFileType val="mha" />' >> $AtlasWerksfile
+echo '</ParameterFile>' >> $AtlasWerksfile
+
+echo "AtlasWerks xml $AtlasWerksfile file generated"
